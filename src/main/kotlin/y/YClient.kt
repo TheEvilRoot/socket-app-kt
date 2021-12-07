@@ -4,13 +4,11 @@ import Logger
 import fileName
 import readN
 import readUntil
-import writeString
+import sendBuffer
+import sendString
 import y.YClient.ReadingStrategy.SocketDownloadStrategy.Companion.inputBuffer
 import java.io.*
-import java.net.ConnectException
-import java.net.InetSocketAddress
-import java.net.Socket
-import java.net.SocketException
+import java.net.*
 import java.util.*
 import kotlin.math.min
 
@@ -18,11 +16,11 @@ class YClient(val log: Logger) {
 
     sealed class ReadingStrategy(val client: YClient, val log: Logger) {
 
-        abstract fun handleLoop(outputStream: OutputStream, inputStream: InputStream): ReadingStrategy
+        abstract fun handleLoop(socket: DatagramSocket, isa: InetSocketAddress): ReadingStrategy
 
         class SocketLineReadingStrategy(client: YClient, log: Logger, val handler: (YClient, ByteArray) -> ReadingStrategy): ReadingStrategy(client, log) {
-            override fun handleLoop(outputStream: OutputStream, inputStream: InputStream): ReadingStrategy {
-                val data = inputStream.readUntil('\n'.code.toByte())
+            override fun handleLoop(socket: DatagramSocket, isa: InetSocketAddress): ReadingStrategy {
+                val (_, data) = socket.readUntil('\n'.code.toByte(), null)
                 if (data.isEmpty()) {
                     client.socket.close()
                     return StdInReadingStrategy(client, log)
@@ -36,7 +34,7 @@ class YClient(val log: Logger) {
             private val fileInput: FileInputStream = file.inputStream()
             private var progress: Long = 0
 
-            override fun handleLoop(outputStream: OutputStream, inputStream: InputStream): ReadingStrategy {
+            override fun handleLoop(socket: DatagramSocket, isa: InetSocketAddress): ReadingStrategy {
                 if (progress >= size) {
                     fileInput.close()
                     return SocketLineReadingStrategy(client, log) { client, data ->
@@ -46,7 +44,7 @@ class YClient(val log: Logger) {
                     }
                 }
                 val bytes = fileInput.readN(min(512, size - progress))
-                outputStream.write(bytes, 0, bytes.size)
+                socket.sendBuffer(bytes, isa)
                 progress += bytes.size
                 return this
             }
@@ -71,7 +69,7 @@ class YClient(val log: Logger) {
                     fileOutput = file.outputStream()
             }
 
-            override fun handleLoop(outputStream: OutputStream, inputStream: InputStream): ReadingStrategy {
+            override fun handleLoop(socket: DatagramSocket, isa: InetSocketAddress): ReadingStrategy {
                 if (fileOutput == null)
                     return StdInReadingStrategy(client, log)
                 if (progress >= fileSize) {
@@ -82,7 +80,8 @@ class YClient(val log: Logger) {
                         StdInReadingStrategy(client, log)
                     }
                 }
-                val buffer = inputStream.readN(min(512, fileSize - progress))
+                log.log { "progress $progress / $fileSize" }
+                val buffer = socket.readN(min(512, fileSize - progress), null)
                 if (buffer.isEmpty()) {
                     client.socket.close()
                     return StdInReadingStrategy(client, log)
@@ -95,11 +94,11 @@ class YClient(val log: Logger) {
 
         class StdInReadingStrategy(client: YClient, log: Logger): ReadingStrategy(client, log) {
 
-            fun handleStdIn(line: String, outputStream: OutputStream, inputStream: InputStream): ReadingStrategy {
+            fun handleStdIn(line: String, socket: DatagramSocket, isa: InetSocketAddress): ReadingStrategy {
                 val params = line.split(" ", limit = 2)
                 if (params.isEmpty()) return this
                 if (params.first().equals("time", ignoreCase = true)) {
-                    outputStream.writeString("time\n")
+                    socket.sendString("time\n", isa)
                     return SocketLineReadingStrategy(client, log) { _, data ->
                         val string = String(data)
                         println("Time: $string")
@@ -109,14 +108,14 @@ class YClient(val log: Logger) {
                     val message = params.getOrNull(1)
                         ?.replace("\n", " ")
                         ?: return this
-                    outputStream.writeString("echo $message\n")
+                    socket.sendString("echo $message\n", isa)
                     return SocketLineReadingStrategy(client, log) { _, data ->
                         val string = String(data)
                         println("Echo: $string")
                         this@StdInReadingStrategy
                     }
                 } else if (params.first().equals("close", ignoreCase = true)) {
-                    outputStream.writeString("close\n")
+                    socket.sendString("close\n", isa)
                     return this
                 } else if (params.first().equals("upload", ignoreCase = true)) {
                     val filePath = params.getOrNull(1)
@@ -126,12 +125,12 @@ class YClient(val log: Logger) {
                         return this
                     val fileSize = file.length()
                     val fileName = filePath.replace(" ", "_")
-                    outputStream.writeString("upload $fileName $fileSize\n")
+                    socket.sendString("upload $fileName $fileSize\n", isa)
                     return SocketUploadStrategy(client, log, file, fileSize)
                 } else if (params.first().equals("download", ignoreCase = true)) {
                     val fileName = params.getOrNull(1)
                         ?: return this
-                    outputStream.writeString("download $fileName\n")
+                    socket.sendString("download $fileName\n", isa)
                     return SocketLineReadingStrategy(client, log) f@{ client, data ->
                         val fileSize = String(data).toLongOrNull()
                             ?: return@f this@StdInReadingStrategy
@@ -144,14 +143,14 @@ class YClient(val log: Logger) {
                 }
             }
 
-            override fun handleLoop(outputStream: OutputStream, inputStream: InputStream): ReadingStrategy {
+            override fun handleLoop(socket: DatagramSocket, isa: InetSocketAddress): ReadingStrategy {
                 if (inputBuffer.isNotEmpty())
-                    return handleStdIn(inputBuffer.pop(), outputStream, inputStream)
+                    return handleStdIn(inputBuffer.pop(), socket, isa)
                 print("> ")
                 val line = readLine() ?: return this
                 if (line.isBlank()) return this
                 try {
-                    return handleStdIn(line, outputStream, inputStream)
+                    return handleStdIn(line, socket, isa)
                 } catch (e: Exception) {
                     inputBuffer.push(line)
                     throw e
@@ -160,27 +159,14 @@ class YClient(val log: Logger) {
         }
     }
 
-    private var socket: Socket = Socket()
-    private var outputStream: OutputStream? = null
-    private var inputStream: InputStream? = null
+    private val isa: InetSocketAddress = InetSocketAddress("127.0.0.1", 2002)
+    private var socket: DatagramSocket = DatagramSocket()
 
     fun createSocket(): Boolean {
         if (!socket.isClosed)
             socket.close()
-        socket = Socket()
+        socket = DatagramSocket()
         log.log { "-> connect" }
-        socket.soTimeout = 10_000
-
-        try {
-            socket.connect(InetSocketAddress("127.0.0.1", 2000))
-            log.log { " <- connect" }
-
-            outputStream = socket.getOutputStream()
-            inputStream = socket.getInputStream()
-        } catch (e: ConnectException) {
-            println("Server is inaccessible")
-            return false
-        }
         return true
     }
 
@@ -189,14 +175,10 @@ class YClient(val log: Logger) {
 
         var strategy: ReadingStrategy = ReadingStrategy.StdInReadingStrategy(this, log)
         var reconnection = 0
-        while (socket.isConnected) {
-            val inputStream = inputStream
-            val outputStream = outputStream
-            if (inputStream == null || outputStream == null)
-                break
+        while (true) {
             log.log { "-> handleLoop ${strategy::class.java.simpleName}" }
             try {
-                strategy = strategy.handleLoop(outputStream, inputStream)
+                strategy = strategy.handleLoop(socket, isa)
             } catch (e: SocketException) {
                 log.log { "<- socket broken. reconnecting $reconnection..." }
                 if (++reconnection < 10)
