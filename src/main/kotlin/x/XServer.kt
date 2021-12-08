@@ -158,7 +158,7 @@ class XServer(val log: Logger) {
 
     fun listenBlocking() {
         log.log { "-> listenBlocking $state" }
-        val socket = DatagramSocket(2002, InetAddress.getByName("localhost"))
+        val socket = DatagramSocket(2002, InetAddress.getByName("0.0.0.0"))
         while (state == State.ALIVE) {
             val client = XClient()
             log.log { "-> loopClient ${socket.port}" }

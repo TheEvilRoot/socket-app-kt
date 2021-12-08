@@ -5,6 +5,7 @@ import java.io.OutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
+import java.net.SocketTimeoutException
 
 fun InputStream.readUntil(terminator: Byte, including: Boolean = false): ByteArray {
     val buffer = mutableListOf<Byte>()
@@ -29,6 +30,7 @@ fun InputStream.readUntil(terminator: Byte, including: Boolean = false): ByteArr
 
 fun InputStream.readN(count: Long): ByteArray {
     val buffer = mutableListOf<Byte>()
+    var failure = 0
     while (true) {
         try {
             if (buffer.size >= count)
@@ -38,6 +40,11 @@ fun InputStream.readN(count: Long): ByteArray {
                 break
             val byte = data.toByte()
             buffer.add(byte)
+        } catch (e: SocketTimeoutException) {
+            Thread.sleep(1000)
+            if (failure++ < 10)
+                continue
+            break
         } catch (e: IOException) {
             e.printStackTrace()
             break
@@ -63,18 +70,29 @@ fun DatagramSocket.sendString(string: String, isa: InetSocketAddress?) {
     if (string.length > 255) {
         return string.chunked(255).forEach { sendString(it, isa) }
     }
-    val sizeBuffer = byteArrayOf(string.length.toByte())
-    val sizePacket = if (isa == null)
-        DatagramPacket(sizeBuffer, 0, sizeBuffer.size)
-    else DatagramPacket(sizeBuffer, 0, sizeBuffer.size, isa.address, isa.port)
-    send(sizePacket)
-//    var ack = ByteArray(1)
-//    var ackPacket = DatagramPacket(ack, 0, ack.size)
-//    receive(ackPacket)
-    val packet = if (isa == null)
-        DatagramPacket(string.toByteArray(), 0, string.length)
-    else DatagramPacket(string.toByteArray(), 0, string.length, isa.address, isa.port)
-    send(packet)
+    var failures = 0
+    while (failures < 10) {
+        try {
+            val sizeBuffer = byteArrayOf(string.length.toByte())
+            val sizePacket = if (isa == null)
+                DatagramPacket(sizeBuffer, 0, sizeBuffer.size)
+            else DatagramPacket(sizeBuffer, 0, sizeBuffer.size, isa.address, isa.port)
+            send(sizePacket)
+    //    var ack = ByteArray(1)
+    //    var ackPacket = DatagramPacket(ack, 0, ack.size)
+    //    receive(ackPacket)
+            val packet = if (isa == null)
+                DatagramPacket(string.toByteArray(), 0, string.length)
+            else DatagramPacket(string.toByteArray(), 0, string.length, isa.address, isa.port)
+            send(packet)
+            return
+        } catch (e: IOException) {
+            Thread.sleep(1000)
+            if (failures++ < 10)
+                continue
+            throw e
+        }
+    }
 //    ack = ByteArray(1)
 //    ackPacket = DatagramPacket(ack, 0, ack.size)
 //    receive(ackPacket)
@@ -84,22 +102,32 @@ fun DatagramSocket.sendBuffer(buffer: ByteArray, isa: InetSocketAddress?) {
     if (buffer.size > 255) {
         return buffer.toList().chunked(255).forEach { sendBuffer(it.toByteArray(), isa) }
     }
-    val sizeBuffer = byteArrayOf(buffer.size.toByte())
-    val sizePacket = if (isa == null)
-        DatagramPacket(sizeBuffer, 0, sizeBuffer.size)
-    else DatagramPacket(sizeBuffer, 0, sizeBuffer.size, isa.address, isa.port)
-    send(sizePacket)
+    var failures = 0
+    while (failures < 10) {
+        try {
+            val sizeBuffer = byteArrayOf(buffer.size.toByte())
+            val sizePacket = if (isa == null)
+                DatagramPacket(sizeBuffer, 0, sizeBuffer.size)
+            else DatagramPacket(sizeBuffer, 0, sizeBuffer.size, isa.address, isa.port)
+            send(sizePacket)
 //    var ack = ByteArray(1)
 //    var ackPacket = DatagramPacket(ack, 0, ack.size)
 //    receive(ackPacket)
-    val packet = if (isa == null)
-        DatagramPacket(buffer, 0, buffer.size)
-    else DatagramPacket(buffer, 0, buffer.size, isa.address, isa.port)
-    send(packet)
+            val packet = if (isa == null)
+                DatagramPacket(buffer, 0, buffer.size)
+            else DatagramPacket(buffer, 0, buffer.size, isa.address, isa.port)
+            send(packet)
+            return
+        } catch (e: IOException) {
+            Thread.sleep(1000)
+            if (failures++ < 10)
+                continue
+            throw e
+        }
+    }
 //    ack = ByteArray(1)
 //    ackPacket = DatagramPacket(ack, 0, ack.size)
 //    receive(ackPacket)
-    println("sent ${buffer.size}")
 }
 
 
@@ -115,7 +143,6 @@ fun DatagramSocket.readN(count: Long, isa: InetSocketAddress?): ByteArray {
 //        val ackPacket = DatagramPacket(ack, 0, ack.size, sizePacket.address, sizePacket.port)
 //        send(ackPacket)
         val size = sizePacket.data.firstOrNull()?.toUByte()?.toInt() ?: 0
-        println("size $size")
         if (size > 0) {
             val buffer = ByteArray(size)
             val packet = if (isa == null)
@@ -123,7 +150,6 @@ fun DatagramSocket.readN(count: Long, isa: InetSocketAddress?): ByteArray {
             else DatagramPacket(buffer, 0, size, isa.address, isa.port)
             receive(packet)
             ret += packet.data ?: byteArrayOf()
-            println("ret ${ret.size}/$count")
 //            println("waiting ack")
 //            val ack = byteArrayOf(size.toByte())
 //            val ackPacket = DatagramPacket(ack, 0, ack.size, packet.address, packet.port)
@@ -135,7 +161,6 @@ fun DatagramSocket.readN(count: Long, isa: InetSocketAddress?): ByteArray {
 }
 
 fun DatagramSocket.readUntil(terminator: Byte, isa: InetSocketAddress?): Pair<DatagramPacket, ByteArray> {
-    println("isa = $isa")
     var ret = byteArrayOf()
     var packet = DatagramPacket(ByteArray(1), 0, 1)
     val sizeBuffer = ByteArray(1)
@@ -144,9 +169,6 @@ fun DatagramSocket.readUntil(terminator: Byte, isa: InetSocketAddress?): Pair<Da
             DatagramPacket(sizeBuffer, 0, sizeBuffer.size)
         else DatagramPacket(sizeBuffer, 0, sizeBuffer.size, isa.address, isa.port)
         receive(packet)
-//        val ack = byteArrayOf(0)
-//        val ackPacket = DatagramPacket(ack, 0, ack.size, packet.address, packet.port)
-//        send(ackPacket)
         val size = packet.data.firstOrNull()?.toUByte()?.toInt() ?: 0
         if (size > 0) {
             val buffer = ByteArray(size)
@@ -155,11 +177,6 @@ fun DatagramSocket.readUntil(terminator: Byte, isa: InetSocketAddress?): Pair<Da
             else DatagramPacket(buffer, 0, buffer.size, isa.address, isa.port)
             receive(packet)
             ret += packet.data.copyOfRange(0, packet.length)
-//            println("waiting ack")
-//            val ack = byteArrayOf(size.toByte())
-//            val ackPacket = DatagramPacket(ack, 0, ack.size, packet.address, packet.port)
-//            send(ackPacket)
-//            println("ack")
         }
     }
     return packet to ret.dropLast(1).toByteArray()
