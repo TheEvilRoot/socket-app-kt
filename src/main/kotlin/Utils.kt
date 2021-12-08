@@ -2,6 +2,7 @@ import java.io.EOFException
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.SocketTimeoutException
 
 fun InputStream.readUntil(terminator: Byte, including: Boolean = false): ByteArray {
     val buffer = mutableListOf<Byte>()
@@ -26,6 +27,7 @@ fun InputStream.readUntil(terminator: Byte, including: Boolean = false): ByteArr
 
 fun InputStream.readN(count: Long): ByteArray {
     val buffer = mutableListOf<Byte>()
+    var failure = 0
     while (true) {
         try {
             if (buffer.size >= count)
@@ -35,6 +37,11 @@ fun InputStream.readN(count: Long): ByteArray {
                 break
             val byte = data.toByte()
             buffer.add(byte)
+        } catch (e: SocketTimeoutException) {
+            Thread.sleep(1000)
+            if (failure++ < 10)
+                continue
+            break
         } catch (e: IOException) {
             e.printStackTrace()
             break

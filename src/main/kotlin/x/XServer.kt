@@ -79,8 +79,10 @@ class XServer(val log: Logger) {
             override fun handleLoop(inputStream: InputStream, outputStream: OutputStream): ReadingStrategy {
                 val fileInput = fileInput
 
-                if (fileSize <= 0 || fileInput == null)
+                if (fileSize <= 0 || fileInput == null) {
+                    outputStream.writeString("0\n")
                     return CommandReadingStrategy(client, log)
+                }
 
                 val delta = System.nanoTime() - startTime
                 val bps = if (delta > 0) progress.toDouble() / (delta.toDouble() / 1_000_000_000) else 0.0
