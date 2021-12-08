@@ -99,6 +99,10 @@ fun OutputStream.writeString(string: String) {
     write(string.toByteArray(), 0, string.length)
 }
 
+fun ByteBuffer.putString(string: String) {
+    put(string.toByteArray())
+}
+
 fun String.fileName(): String {
     if (isBlank())
         return "unnamed_file"

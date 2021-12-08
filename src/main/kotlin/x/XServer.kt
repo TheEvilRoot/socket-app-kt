@@ -2,6 +2,7 @@ package x
 
 import Logger
 import fileName
+import putString
 import readN
 import writeString
 import java.io.*
@@ -19,7 +20,7 @@ class XServer(val log: Logger) {
 
     sealed class ReadingStrategy(val client: XClient, val log: Logger) {
 
-        abstract fun handleLoop(outputStream: OutputStream): ReadingStrategy
+        abstract fun handleLoop(outputStream: ByteBuffer): ReadingStrategy
 
         class UploadReadingStrategy(client: XClient, log: Logger, outFileName: String, val outFileSize: Long): ReadingStrategy(client, log) {
 
@@ -37,7 +38,7 @@ class XServer(val log: Logger) {
                     fileOutput = FileOutputStream(file)
             }
 
-            override fun handleLoop(outputStream: OutputStream): ReadingStrategy {
+            override fun handleLoop(outputStream: ByteBuffer): ReadingStrategy {
                 val delta = System.nanoTime() - startTime
                 val bps = if (delta > 0) progress.toDouble() / (delta.toDouble() / 1_000_000_000) else 0.0
                 val spd =  String.format("%.2f", bps)
@@ -45,7 +46,7 @@ class XServer(val log: Logger) {
 
                 if (progress >= outFileSize) {
                     fileOutput?.close()
-                    outputStream.writeString(spd + "\n")
+                    outputStream.putString(spd + "\n")
                     return CommandReadingStrategy(client, log)
                 }
                 val required = kotlin.math.min(512L, outFileSize - progress).toInt()
@@ -80,7 +81,7 @@ class XServer(val log: Logger) {
                 }
             }
 
-            override fun handleLoop(outputStream: OutputStream): ReadingStrategy {
+            override fun handleLoop(outputStream: ByteBuffer): ReadingStrategy {
                 val fileInput = fileInput
 
                 if (fileSize <= 0 || fileInput == null)
@@ -93,21 +94,21 @@ class XServer(val log: Logger) {
 
                 if (progress >= fileSize) {
                     fileInput.close()
-                    outputStream.writeString(spd + "\n")
+                    outputStream.putString(spd + "\n")
                     return CommandReadingStrategy(client, log)
                 }
                 if (progress == 0L) {
-                    outputStream.writeString(fileSize.toString() + "\n")
+                    outputStream.putString(fileSize.toString() + "\n")
                 }
                 val bytes = fileInput.readN(kotlin.math.min(512L, fileSize - progress))
-                outputStream.write(bytes)
+                outputStream.put(bytes)
                 progress += bytes.size
                 return this
             }
         }
 
         class CommandReadingStrategy(client: XClient, log: Logger): ReadingStrategy(client, log) {
-            override fun handleLoop(outputStream: OutputStream): ReadingStrategy {
+            override fun handleLoop(outputStream: ByteBuffer): ReadingStrategy {
                 if (!client.buffer.contains('\n'.code.toByte()))
                     return this
                 val buffer = client.buffer.copyOfRange(0, client.buffer.indexOf('\n'.code.toByte()))
@@ -120,10 +121,10 @@ class XServer(val log: Logger) {
                 log.log { "-> line $line" }
                 val params = line.split(" ", limit=2)
                 if (params.isNotEmpty() && params.first().equals("time", ignoreCase = true)) {
-                    outputStream.writeString(Instant.now().toString() + "\n")
+                    outputStream.putString(Instant.now().toString() + "\n")
                     return this
                 } else if (params.isNotEmpty() && params.first().equals("echo", ignoreCase = true)) {
-                    outputStream.writeString(params.getOrElse(1) { "" } + "\n")
+                    outputStream.putString(params.getOrElse(1) { "" } + "\n")
                     return this
                 } else if (params.isNotEmpty() && params.first().equals("close", ignoreCase = true)) {
                     client.state = XClient.State.CLOSED
@@ -165,9 +166,9 @@ class XServer(val log: Logger) {
 
         val clients = mutableMapOf<SocketAddress, XClient>()
         while (state == State.ALIVE) {
-            val x = selector.select(50)
+            val x = selector.select(20)
             if (x == 0) {
-                clients.forEach { (t, u) ->
+                clients.forEach { (_, u) ->
                     when (u.strategy) {
                         is ReadingStrategy.DownloadReadingStrategy,
                         is ReadingStrategy.UploadReadingStrategy -> u.push()

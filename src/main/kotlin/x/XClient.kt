@@ -15,12 +15,15 @@ class XClient(val channel: SocketChannel, val log: Logger) {
 
     var buffer: ByteArray = byteArrayOf()
 
+    val output: ByteBuffer = ByteBuffer.allocate(1024 * 1024)
+
     fun push() {
-        val outputStream = ByteArrayOutputStream(1024 * 1024)
         log.log { "-> handleLoop ${strategy::class.java.simpleName}" }
-        strategy = strategy.handleLoop(outputStream)
+        strategy = strategy.handleLoop(output)
         log.log { "<- handleLoop ${strategy::class.java.simpleName}" }
-        channel.write(ByteBuffer.wrap(outputStream.toByteArray()))
+        output.flip()
+        channel.write(output)
+        output.clear()
     }
 
 }
