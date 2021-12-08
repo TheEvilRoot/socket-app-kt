@@ -172,7 +172,7 @@ class YClient(val log: Logger) {
         socket.soTimeout = 10_000
 
         try {
-            socket.connect(InetSocketAddress("127.0.0.1", 2000))
+            socket.connect(InetSocketAddress("127.0.0.1", 2003))
             log.log { " <- connect" }
 
             outputStream = socket.getOutputStream()

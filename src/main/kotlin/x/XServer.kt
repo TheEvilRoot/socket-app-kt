@@ -3,14 +3,15 @@ package x
 import Logger
 import fileName
 import readN
-import readUntil
 import writeString
 import java.io.*
-import java.net.InetAddress
-import java.net.ServerSocket
-import java.net.Socket
+import java.net.*
+import java.nio.ByteBuffer
+import java.nio.channels.SelectionKey
+import java.nio.channels.Selector
+import java.nio.channels.ServerSocketChannel
+import java.nio.channels.SocketChannel
 import java.time.Instant
-import java.util.concurrent.TimeUnit
 
 class XServer(val log: Logger) {
 
@@ -18,7 +19,7 @@ class XServer(val log: Logger) {
 
     sealed class ReadingStrategy(val client: XClient, val log: Logger) {
 
-        abstract fun handleLoop(inputStream: InputStream, outputStream: OutputStream): ReadingStrategy
+        abstract fun handleLoop(outputStream: OutputStream): ReadingStrategy
 
         class UploadReadingStrategy(client: XClient, log: Logger, outFileName: String, val outFileSize: Long): ReadingStrategy(client, log) {
 
@@ -36,7 +37,7 @@ class XServer(val log: Logger) {
                     fileOutput = FileOutputStream(file)
             }
 
-            override fun handleLoop(inputStream: InputStream, outputStream: OutputStream): ReadingStrategy {
+            override fun handleLoop(outputStream: OutputStream): ReadingStrategy {
                 val delta = System.nanoTime() - startTime
                 val bps = if (delta > 0) progress.toDouble() / (delta.toDouble() / 1_000_000_000) else 0.0
                 val spd =  String.format("%.2f", bps)
@@ -47,9 +48,12 @@ class XServer(val log: Logger) {
                     outputStream.writeString(spd + "\n")
                     return CommandReadingStrategy(client, log)
                 }
-                val data = inputStream.readN(kotlin.math.min(512L, outFileSize - progress))
+                val required = kotlin.math.min(512L, outFileSize - progress).toInt()
+                if (client.buffer.size < required)
+                    return this
+                val data = client.buffer.copyOfRange(0, required)
+                client.buffer = client.buffer.drop(required).toByteArray()
                 if (data.isEmpty()) {
-                    client.state = XClient.State.CLOSED
                     return this
                 }
 
@@ -76,7 +80,7 @@ class XServer(val log: Logger) {
                 }
             }
 
-            override fun handleLoop(inputStream: InputStream, outputStream: OutputStream): ReadingStrategy {
+            override fun handleLoop(outputStream: OutputStream): ReadingStrategy {
                 val fileInput = fileInput
 
                 if (fileSize <= 0 || fileInput == null)
@@ -103,10 +107,12 @@ class XServer(val log: Logger) {
         }
 
         class CommandReadingStrategy(client: XClient, log: Logger): ReadingStrategy(client, log) {
-            override fun handleLoop(inputStream: InputStream, outputStream: OutputStream): ReadingStrategy {
-                val buffer = inputStream.readUntil('\n'.code.toByte())
+            override fun handleLoop(outputStream: OutputStream): ReadingStrategy {
+                if (!client.buffer.contains('\n'.code.toByte()))
+                    return this
+                val buffer = client.buffer.copyOfRange(0, client.buffer.indexOf('\n'.code.toByte()))
+                client.buffer = client.buffer.drop(buffer.size + 1).toByteArray()
                 if (buffer.isEmpty()) {
-                    client.state = XClient.State.CLOSED
                     return this
                 }
 
@@ -146,28 +152,54 @@ class XServer(val log: Logger) {
 
     var state: State = State.ALIVE
 
-    private val server: ServerSocket = ServerSocket(2000, 50, InetAddress.getByName("0.0.0.0"))
+    private val socketChannel = ServerSocketChannel.open()
 
     fun listenBlocking() {
+        socketChannel.configureBlocking(false)
+        val server = socketChannel.socket()
+
+        server.bind(InetSocketAddress(2003))
+        val selector = Selector.open()
+        socketChannel.register(selector, SelectionKey.OP_ACCEPT)
         log.log { "-> listenBlocking $state" }
+
+        val clients = mutableMapOf<SocketAddress, XClient>()
         while (state == State.ALIVE) {
-            val socket = server.accept()
-            log.log { "-> accepted ${socket.inetAddress.hostAddress}" }
-            val client = XClient()
-            loopClient(socket, client)
+            val x = selector.select(50)
+            if (x == 0) {
+                clients.forEach { (t, u) ->
+                    when (u.strategy) {
+                        is ReadingStrategy.DownloadReadingStrategy,
+                        is ReadingStrategy.UploadReadingStrategy -> u.push()
+                    }
+                }
+                continue
+            }
+            val keys = selector.selectedKeys()
+            for (key in keys.iterator()) {
+                if ((key.readyOps() and SelectionKey.OP_ACCEPT) == SelectionKey.OP_ACCEPT) {
+                    val socket = server.accept()
+                    log.log { "-> accepted ${socket.inetAddress.hostAddress}" }
+                    val channel = socket.channel
+                    channel.configureBlocking(false)
+                    channel.register(selector, SelectionKey.OP_READ)
+                    clients[channel.remoteAddress] = XClient(channel, log)
+                } else if ((key.readyOps() and SelectionKey.OP_READ) == SelectionKey.OP_READ) {
+                    val clientChannel = key.channel() as SocketChannel
+                    val buffer = ByteBuffer.allocate(512)
+                    val count = clientChannel.read(buffer)
+                    if (count > 0) {
+                        val client = clients[clientChannel.remoteAddress]
+                        if (client != null) {
+                            client.buffer += buffer.array().copyOfRange(0, count)
+                            client.push()
+                        }
+                    }
+                }
+            }
+            keys.removeAll(keys)
         }
         log.log { "<- listenBlocking $state" }
-    }
-
-    fun loopClient(socket: Socket, client: XClient) {
-        val inputStream: InputStream = socket.getInputStream() ?: throw RuntimeException("no input")
-        val outputStream: OutputStream = socket.getOutputStream() ?: throw RuntimeException("no output")
-        var readingStrategy: ReadingStrategy = ReadingStrategy.CommandReadingStrategy(client, log)
-        while (socket.isConnected && client.state == XClient.State.ALIVE) {
-            log.log { "-> handleLoop ${readingStrategy::class.java.simpleName} ${socket.isConnected} ${socket.isClosed}" }
-            readingStrategy = readingStrategy.handleLoop(inputStream, outputStream)
-            log.log { "<- handleLoop ${readingStrategy::class.java.simpleName} ${socket.isConnected} ${socket.isClosed}" }
-        }
     }
 
 }
