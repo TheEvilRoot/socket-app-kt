@@ -84,8 +84,7 @@ class YClient(val log: Logger) {
                 }
                 val buffer = inputStream.readN(min(512, fileSize - progress))
                 if (buffer.isEmpty()) {
-                    client.socket.close()
-                    return StdInReadingStrategy(client, log)
+                    throw SocketException("eof")
                 }
                 fileOutput?.write(buffer, 0, buffer.size)
                 progress += buffer.size
@@ -199,6 +198,7 @@ class YClient(val log: Logger) {
                 strategy = strategy.handleLoop(outputStream, inputStream)
             } catch (e: SocketException) {
                 log.log { "<- socket broken. reconnecting $reconnection..." }
+                Thread.sleep(1000)
                 if (++reconnection < 10)
                     if (createSocket()) continue
                 break

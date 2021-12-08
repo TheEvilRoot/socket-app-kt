@@ -9,7 +9,7 @@ fun main(args: Array<String>) {
     }
     when (args.firstOrNull()?.lowercase(Locale.getDefault())) {
         "client" -> YClient(logger).listen()
-        "server" -> XServer(logger).listenBlocking()
+        "server" -> XServer(logger, 4, 4).listen()
         else -> println("Invalid arguments\n${args.joinToString()}")
     }
 }

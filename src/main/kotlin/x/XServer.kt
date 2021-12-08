@@ -10,9 +10,12 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.time.Instant
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.*
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
-class XServer(val log: Logger) {
+class XServer(val log: Logger, val threadMax: Int, val threadMin: Int): ThreadFactory {
 
     enum class State { ALIVE, FAILED, KILLED }
 
@@ -79,8 +82,10 @@ class XServer(val log: Logger) {
             override fun handleLoop(inputStream: InputStream, outputStream: OutputStream): ReadingStrategy {
                 val fileInput = fileInput
 
-                if (fileSize <= 0 || fileInput == null)
+                if (fileSize <= 0 || fileInput == null) {
+                    outputStream.writeString("0\n")
                     return CommandReadingStrategy(client, log)
+                }
 
                 val delta = System.nanoTime() - startTime
                 val bps = if (delta > 0) progress.toDouble() / (delta.toDouble() / 1_000_000_000) else 0.0
@@ -146,27 +151,56 @@ class XServer(val log: Logger) {
 
     var state: State = State.ALIVE
 
-    private val server: ServerSocket = ServerSocket(2000, 50, InetAddress.getByName("0.0.0.0"))
+    val socket: ServerSocket = ServerSocket(2000, 50, InetAddress.getByName("0.0.0.0"))
 
-    fun listenBlocking() {
-        log.log { "-> listenBlocking $state" }
-        while (state == State.ALIVE) {
-            val socket = server.accept()
-            log.log { "-> accepted ${socket.inetAddress.hostAddress}" }
-            val client = XClient()
-            loopClient(socket, client)
-        }
-        log.log { "<- listenBlocking $state" }
+    val acceptorTag: AtomicInteger = AtomicInteger(0)
+
+    val acceptLock: ReentrantLock = ReentrantLock()
+
+    val threadPool = ThreadPoolExecutor(
+        threadMin,
+        threadMax,
+        60,
+        TimeUnit.SECONDS,
+        ArrayBlockingQueue(threadMax),
+        this
+    )
+
+    override fun newThread(r: Runnable): Thread {
+        return ClientAcceptor(acceptorTag.incrementAndGet(), log, this, acceptLock)
     }
 
-    fun loopClient(socket: Socket, client: XClient) {
-        val inputStream: InputStream = socket.getInputStream() ?: throw RuntimeException("no input")
-        val outputStream: OutputStream = socket.getOutputStream() ?: throw RuntimeException("no output")
-        var readingStrategy: ReadingStrategy = ReadingStrategy.CommandReadingStrategy(client, log)
-        while (socket.isConnected && client.state == XClient.State.ALIVE) {
-            log.log { "-> handleLoop ${readingStrategy::class.java.simpleName} ${socket.isConnected} ${socket.isClosed}" }
-            readingStrategy = readingStrategy.handleLoop(inputStream, outputStream)
-            log.log { "<- handleLoop ${readingStrategy::class.java.simpleName} ${socket.isConnected} ${socket.isClosed}" }
+    fun listen() {
+        threadPool.prestartAllCoreThreads()
+    }
+
+    class ClientAcceptor(val tag: Int, val log: Logger, val server: XServer, val acceptLock: ReentrantLock): Thread("ClientAcceptor") {
+
+        override fun run() {
+            log.log { "-> listenBlocking $tag $state" }
+            while (server.state == XServer.State.ALIVE) {
+                val socket = acceptLock.withLock {
+                    log.log { "-> accept $tag" }
+                    server.socket.accept().also {
+                        log.log { "<- accept $tag" }
+                    }
+                }
+                log.log { "-> accepted ${socket.inetAddress.hostAddress}" }
+                val client = XClient()
+                loopClient(socket, client)
+            }
+            log.log { "<- listenBlocking $state" }
+        }
+
+        fun loopClient(socket: Socket, client: XClient) {
+            val inputStream: InputStream = socket.getInputStream() ?: throw RuntimeException("no input")
+            val outputStream: OutputStream = socket.getOutputStream() ?: throw RuntimeException("no output")
+            var readingStrategy: ReadingStrategy = ReadingStrategy.CommandReadingStrategy(client, log)
+            while (socket.isConnected && client.state == XClient.State.ALIVE) {
+                log.log { "-> handleLoop ${readingStrategy::class.java.simpleName} ${socket.isConnected} ${socket.isClosed}" }
+                readingStrategy = readingStrategy.handleLoop(inputStream, outputStream)
+                log.log { "<- handleLoop ${readingStrategy::class.java.simpleName} ${socket.isConnected} ${socket.isClosed}" }
+            }
         }
     }
 
